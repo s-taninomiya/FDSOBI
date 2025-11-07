@@ -143,20 +143,34 @@ for iIter = 1:nIter
     for i = 1:I
         for p = 1:(N-1)
             for q = (p+1):N
-                thetaNum = 0;
-                thetaDen = 0;
+                G = zeros(3, 3);
                 for iTau = 1:nTau
                     r = U(:, :, i)' * RZ(:, :, i, iTau) * U(:, :, i);
-                    delta = 2 * real(r(p, q));
-                    diff = r(p, p) - r(q, q);
-                    thetaNum = thetaNum + delta;
-                    thetaDen = thetaDen + diff;
+                    h = [r(p, p) - r(q, q); r(p, q) + r(q, p); 1j * (r(q, p) - r(p, q))];
+                    G = G + real(h * h');
                 end
-                theta = 0.5 * atan2(thetaNum, thetaDen);
+                [VG, DG] = eig(G);
+                [~, idx] = max(diag(DG));
+                x = VG(1, idx); y = VG(2, idx); z = VG(3, idx);
+                rVal = sqrt(x^2 + y^2 + z^2);
+
+                if rVal < 1e-12 || isnan(rVal)
+                    continue;
+                end
+                num = (x + rVal);
+                if num <= 0
+                    continue;
+                end
+
+                c = sqrt((x + rVal) / (2*rVal)); s = (y - 1j*z) / sqrt(2*rVal*(x + rVal));
+
+                % if isnan(c) || isnan(s)
+                %     continue;
+                % end
+
                 J = eye(N);
-                c = cos(theta); s = sin(theta);
-                J([p, q], [p, q]) = [c, -s; s, c];
-                U(:, :, i) = U(:, :, i) * J;
+                J([p q],[p q]) = [c, -conj(s); s, conj(c)];
+                U(:,:,i) = U(:,:,i) * J;
             end
         end
     end
