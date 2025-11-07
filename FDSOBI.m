@@ -1,4 +1,4 @@
-function [estSig, cost] = FDSOBI(mixSig, nSrc, tauList, sampFreq, windowSize, shiftSize, fftNum, windowType, nIter, drawConv)
+function [estSig, cost] = FDSOBI(mixSig, srcSig, nSrc, tauList, sampFreq, windowSize, shiftSize, fftNum, windowType, nIter, permSolver, isFilt, drawConv)
 % Frequency-Domain Second-Order Blind Source Identification (FDSOBI)
 %
 % Coded by S. Taninomiya
@@ -14,18 +14,19 @@ function [estSig, cost] = FDSOBI(mixSig, nSrc, tauList, sampFreq, windowSize, sh
 %   windowSize: window length [points] in STFT (scalar, default: next higher power of 2 that exceeds 0.256*sampFreq)
 %    shiftSize: shift length [points] in STFT (scalar, default: fftSize/2)
 %       fftNum: fft length [points] in STFT (scalar, default: windowsize)
-%   windowType: window function used in STFT (name of window function, default: 'blackman')
+%   windowType: window function used in STFT (name of window function, default: 'b')
 %        nIter: number of iterations in the joint diagonalization (scalar, default: 10)
 %     drawConv: plot cost function values in each iteration or not (true or false, default: false)
 %
 % [outputs]
-%       estSig: estimated signals (sigLen x nMic x nSrc)
+%       estSig: estimated signals (sigLen x nSrc)
 %         cost: convergence behavior of cost function in ILRMA (nIter+1 x 1)
 %
 
 % Arguments check and set default values
 arguments
     mixSig (:, :) double
+    srcSig (:,:,:) double {mustBeNumeric}
     nSrc (1,1) double {mustBeInteger(nSrc)}
     tauList (:,1) double {mustBeInteger(tauList)}
     sampFreq (1,1) double
@@ -34,6 +35,8 @@ arguments
     fftNum (1,1) double {mustBeInteger(fftNum)} = windowSize
     windowType char {mustBeMember(windowType,{'h','b'})} = 'b'
     nIter (1,1) double {mustBeInteger(nIter)} = 10
+    permSolver (1,1) string {mustBeMember(permSolver, ["none", "IPS"])} = "none"
+    isFilt (1,1) logical = false
     drawConv (1,1) logical = false
 end
 
@@ -52,13 +55,26 @@ mixSpecgram = F(mixSig);
 
 % Apply FDSOBI
 [estSpecgram, demixMat, cost] = local_FDSOBI(mixSpecgram, nIter, tauList, drawConv);
+[I, J, ~] = size(estSpecgram);
+
+% Apply permutation solver
+if permSolver == "none"
+    estSpecgramPerm = estSpecgram;
+    estPerm = repmat(1:nSrc, [I, 1]);
+else % IPS
+    srcSpecgram = F(srcSig);
+    [estSpecgramPerm, estPerm] = permSolverIps(estSpecgram, srcSpecgram);
+end
+demixMatPerm = zeros(nSrc, nMic, I);
+for i = 1:I
+    demixMatPerm(:, :, i) = demixMat(estPerm(i, :), :, i);
+end
 
 % Apply back projection
-[I, J, ~] = size(estSpecgram);
 candEstSpecgram = zeros(I, J, nSrc, nMic);
 candDemixMat = zeros(nSrc, nMic, I, nMic);
 for iMic = 1 : nMic
-    [candEstSpecgram(:,:,:,iMic), candDemixMat(:,:,:,iMic)] = local_backProjectionInit(estSpecgram, mixSpecgram(:,:,iMic), demixMat); % scale-fixed estimated signal
+    [candEstSpecgram(:,:,:,iMic), candDemixMat(:,:,:,iMic)] = local_backProjectionInit(estSpecgramPerm, mixSpecgram(:,:,iMic), demixMatPerm); % scale-fixed estimated signal
 end
 ind = (1:nMic).';
 estSpecgramFix = zeros(I, J, nMic);
@@ -69,7 +85,12 @@ for iMic = 1 : nMic
 end
 
 % Calculate estimated time-domain signal
-estSig = F.pinv(estSpecgramFix);
+if isFilt
+    estSig = timeDomainConvergence(mixSpecgram, demixMatFix, F, windowSize, sigLen, nSrc, nMic);
+else
+    estSig = F.pinv(estSpecgramFix);
+end
+estSig = estSig(1:sigLen, :);
 
 end
 
@@ -252,4 +273,26 @@ fixY = Ap .* Ypp; % M x N x J x I, using implicit expansion
 fixY = permute(fixY, [4, 3, 2, 1]); % I x J x N x M
 fixW = Ap .* Wp; % M x N x N x I, using implicit expansion
 fixW = permute(fixW, [2, 3, 4, 1]); % N x N x I x M
+end
+
+%% Local function for time domain convergence
+function estSig = timeDomainConvergence(inputSpecgram, demixMat, F, windowSize, sigLen, nSrc, nMic)
+% Apply demixing filter in time domain to avoid circular convolution
+obsSigInput = F.pinv(inputSpecgram); % observed signal
+nObs = size(obsSigInput, 1);
+W = cat(3, demixMat, flip(conj(demixMat(:, :, 2:end-1)), 3)); % produce beyond Nyquist components
+demixFilt = real(ifft(W, windowSize, 3)); % fftSize x nSrc x nMic
+demixFilt = circshift(demixFilt, windowSize/2+1, 3); % move peak to center by circular shifting
+iDemix = size(demixFilt, 3);
+tmp = zeros(nObs + iDemix - 1, nMic);
+estSig = zeros(nObs + iDemix - 1, nSrc);
+for iSrc = 1:nSrc
+    for iMic = 1:nMic
+        f = squeeze(demixFilt(iSrc, iMic, :));
+        tmp(:, iMic) = conv(obsSigInput(:, iMic), f); % linear convolution
+    end
+    estSig(:, iSrc) = sum(tmp, 2);
+end
+estSig(1:windowSize/2+1,:) = []; % cut initial components caused by group delay (circular shifting)
+estSig = estSig(1:sigLen, :);
 end
